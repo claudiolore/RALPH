@@ -1,47 +1,73 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-# Configuration for Ollama
-# We point to the host machine's Ollama instance from within the Docker container.
-# On Windows/Mac/WSL, host.docker.internal resolves to the host.
-# Ensure your Ollama (or proxy) is listening and accepts Anthropic-style requests if using the Claude CLI.
+# -------- CONFIG --------
 OLLAMA_BASE_URL="http://host.docker.internal:11434"
-# Specify the model you have pulled in Ollama
-MODEL_NAME="qwen2.5-coder:latest"
+MODEL_NAME="kimi-k2.5:cloud"
+ANTHROPIC_API_KEY=""
+ANTHROPIC_AUTH_TOKEN="ollama"
+# ------------------------
 
-if [ -z "$1" ]; then
+if [ $# -lt 1 ]; then
   echo "Usage: $0 <iterations>"
   exit 1
 fi
 
-for ((i=1; i<=$1; i++)); do
-  echo "Iteration $i"
-  echo "--------------------------------"
-  
-  # Run Claude in a sandbox, pointing it to the local Ollama instance
+ITERATIONS="$1"
+
+# Pre-flight checks
+if ! command -v docker >/dev/null 2>&1; then
+  echo "Error: docker not found in PATH."
+  exit 1
+fi
+
+if [ ! -f "prd.json" ] || [ ! -f "progress.txt" ]; then
+  echo "Error: missing prd.json or progress.txt in current directory."
+  exit 1
+fi
+
+PROMPT=$(cat <<'EOF'
+@prd.json @progress.txt
+
+1. Find the highest-priority feature to work on and work only on that feature.
+This should be the one YOU decide has the highest priority - not necessarily the first in the list.
+2. Check that the types check via npm run typecheck and that the tests pass via npm run test.
+3. Update the PRD with the work that was done.
+4. Append your progress to the progress.txt file.
+Use this to leave a note for the next person working in the codebase.
+5. Make a git commit of that feature.
+
+ONLY WORK ON A SINGLE FEATURE.
+
+If, while implementing the feature, you notice the PRD is complete,
+output exactly:
+<promise>COMPLETE</promise>
+EOF
+)
+
+for ((i=1; i<=ITERATIONS; i++)); do
+  echo
+  echo "========== Iteration $i / $ITERATIONS =========="
+
   result=$(docker sandbox run \
     -e ANTHROPIC_BASE_URL="$OLLAMA_BASE_URL" \
-    -e ANTHROPIC_API_KEY="ollama" \
+    -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+    -e ANTHROPIC_AUTH_TOKEN="$ANTHROPIC_AUTH_TOKEN" \
     claude \
     --model "$MODEL_NAME" \
     --permission-mode acceptEdits \
-    -p "@prd.json @progress.txt \
-1. Find the highest-priority feature to work on and work only on that feature. \
-This should be the one YOU decide has the highest priority - not necessarily the first in the list. \
-2. Check that the types check via npm run typecheck and that the tests pass via npm run test. \
-3. Update the PRD with the work that was done. \
-4. Append your progress to the progress.txt file. \
-Use this to leave a note for the next person working in the codebase. \
-5. Make a git commit of that feature. \
-ONLY WORK ON A SINGLE FEATURE. \
-If, while implementing the feature, you notice the PRD is complete, output <promise>COMPLETE</promise>. \
-")
+    -p "$PROMPT" \
+    2>&1 || true)
 
   echo "$result"
 
-  if [[ "$result" == *"<promise>COMPLETE</promise>"* ]]; then
-    echo "PRD complete, exiting."
-    tt notify "CVM PRD complete after $i iterations"
+  if grep -q "<promise>COMPLETE</promise>" <<< "$result"; then
+    echo "✅ PRD complete after $i iterations."
+    if command -v tt >/dev/null 2>&1; then
+      tt notify "CVM PRD complete after $i iterations"
+    fi
     exit 0
   fi
 done
+
+echo "⚠️ Iterations finished without PRD completion."
